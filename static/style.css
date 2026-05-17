@@ -1,0 +1,29 @@
+body {
+    background: linear-gradient(135deg, #0b1120, #1a2538);
+    color: #eef;
+}
+.card {
+    background: rgba(255,255,255,0.1);
+    backdrop-filter: blur(5px);
+    border: none;
+    border-radius: 20px;
+}
+.card-header {
+    border-radius: 20px 20px 0 0 !important;
+}
+#graph svg {
+    background: #111c2c;
+    border-radius: 12px;
+}
+.node-table {
+    max-height: 300px;
+    overflow-y: auto;
+}
+.node-table table {
+    width: 100%;
+    font-size: 0.8rem;
+}
+.node-table th, .node-table td {
+    padding: 5px;
+    border-bottom: 1px solid #2a3a55;
+}

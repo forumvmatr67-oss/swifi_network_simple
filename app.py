@@ -1,6 +1,7 @@
 import asyncio
 import random
 import uuid
+import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -10,47 +11,46 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 # ---------------------- Константы ----------------------
-IPYBYTE = 2 ** 90          # 2^90 байт
+IPYBYTE = 2 ** 90
 HPYBYTE = 1000 * IPYBYTE
 GPYBYTE = 1000 * HPYBYTE
 
 def bytes_to_ipyb(b: int) -> float:
     return b / IPYBYTE
 
-# ---------------------- Пакет ----------------------
+# ---------------------- Пакет (исправленный порядок полей) ----------------------
 @dataclass
 class Packet:
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
     src: str
     dst: str
     size: int
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
     ttl: int = 30
-    priority: int = 0   # 0-низкий, 1-средний, 2-высокий
-    timestamp: float = field(default_factory=asyncio.get_event_loop().time)
+    priority: int = 0
+    timestamp: float = field(default_factory=time.time)
+    payload: dict = field(default_factory=dict)
 
     def expired(self, now: float) -> bool:
         return self.ttl <= 0 or (now - self.timestamp) > 10.0
 
-# ---------------------- Линк (симуляция канала) ----------------------
+# ---------------------- Линк ----------------------
 class Link:
     def __init__(self, node_a, node_b, delay_ms=20, bandwidth_mbps=100, loss_rate=0.05):
         self.node_a = node_a
         self.node_b = node_b
         self.delay = delay_ms / 1000.0
-        self.bandwidth = bandwidth_mbps * 1e6 / 8   # байт/с
+        self.bandwidth = bandwidth_mbps * 1e6 / 8
         self.loss_rate = loss_rate
 
     async def send(self, packet: Packet, src_node):
-        # Потеря пакета
         if random.random() < self.loss_rate:
             return
-        # Задержка + время передачи
         tx_time = packet.size / self.bandwidth
         await asyncio.sleep(self.delay + tx_time)
         dst_node = self.node_b if src_node == self.node_a else self.node_a
         await dst_node.receive(packet)
 
-# ---------------------- Узел сети ----------------------
+# ---------------------- Узел ----------------------
 class Node:
     def __init__(self, node_id: str, name: str, quota_ipyb: float = 10.0):
         self.id = node_id
@@ -59,12 +59,8 @@ class Node:
         self.tx_bytes = 0
         self.rx_bytes = 0
         self.links: List[Link] = []
-        self.routing_table: Dict[str, str] = {}   # dst -> next_hop_id
-        self.queues = {
-            0: asyncio.Queue(),
-            1: asyncio.Queue(),
-            2: asyncio.Queue(),
-        }
+        self.routing_table: Dict[str, str] = {}
+        self.queues = {0: asyncio.Queue(), 1: asyncio.Queue(), 2: asyncio.Queue()}
         self._running = True
 
     def add_link(self, other, **kwargs):
@@ -78,7 +74,6 @@ class Node:
 
     async def _process_outgoing(self):
         while self._running:
-            # Выбираем пакет с наивысшим приоритетом
             packet = None
             for prio in (2, 1, 0):
                 if not self.queues[prio].empty():
@@ -87,17 +82,12 @@ class Node:
             if packet is None:
                 await asyncio.sleep(0.01)
                 continue
-
-            # Проверка квоты
             if self.tx_bytes + packet.size > self.quota_bytes:
                 continue
             self.tx_bytes += packet.size
-
-            # Маршрутизация
             next_hop = self.routing_table.get(packet.dst)
             if not next_hop:
                 continue
-            # Находим линк к next_hop
             for link in self.links:
                 neighbor = link.node_b if link.node_a == self else link.node_a
                 if neighbor.id == next_hop:
@@ -105,7 +95,6 @@ class Node:
                     break
 
     async def _update_routes(self):
-        """Простой обмен таблицами с соседями (как RIP) раз в 5 секунд."""
         while self._running:
             await asyncio.sleep(5)
             for link in self.links:
@@ -119,7 +108,7 @@ class Node:
     async def receive(self, packet: Packet):
         self.rx_bytes += packet.size
         packet.ttl -= 1
-        now = asyncio.get_event_loop().time()
+        now = time.time()
         if packet.expired(now):
             return
         if packet.dst == self.id:
@@ -131,7 +120,7 @@ class Node:
         await self.queues[packet.priority].put(packet)
 
     async def _deliver(self, packet: Packet):
-        # Тут можно логировать доставку
+        # Можно добавить логирование
         pass
 
     async def stop(self):
@@ -150,7 +139,6 @@ class Node:
         }
 
     async def send_user_packet(self, dst_id: str, size: int, priority: int = 0):
-        """API для отправки пакета из веб-интерфейса."""
         if dst_id not in self.routing_table and dst_id != self.id:
             raise ValueError(f"Нет маршрута до {dst_id}")
         pkt = Packet(src=self.id, dst=dst_id, size=size, priority=priority)
@@ -174,11 +162,10 @@ def create_mesh_topology(names: List[str], link_params=None) -> Dict[str, Node]:
     return nodes
 
 # ---------------------- FastAPI приложение ----------------------
-app = FastAPI(title="SWIFI Network Simulator")
+app = FastAPI(title="SWIFI Network Simulator", description="Симулятор сети с ipybyte, MIT license")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# Глобальная сеть
 network_nodes: Dict[str, Node] = {}
 
 class ConnectionManager:
@@ -201,15 +188,14 @@ manager = ConnectionManager()
 
 @app.on_event("startup")
 async def startup():
-    # Выберите топологию: star или mesh
     global network_nodes
-    # Звезда: хаб "Hub" и листья
+    # Звезда с хабом "Hub" и листьями
     network_nodes = create_star_topology(
         hub_name="Hub",
         leaf_names=["Alpha", "Beta", "Gamma"],
         link_params={"delay_ms": 10, "bandwidth_mbps": 50, "loss_rate": 0.02}
     )
-    # Или mesh:
+    # Для mesh раскомментируйте:
     # network_nodes = create_mesh_topology(["NodeA", "NodeB", "NodeC", "NodeD"])
     for node in network_nodes.values():
         await node.start()
@@ -254,11 +240,10 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()  # просто держим соединение
+            await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
-# Запуск: uvicorn app:app --reload
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
